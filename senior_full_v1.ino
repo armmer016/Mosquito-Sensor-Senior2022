@@ -161,18 +161,18 @@ void blink_led() {
 int totalLoop = 0;
 //Loop function
 void loop(void) {
-  totalLoop += 1;
+  // totalLoop += 1;
   isMosDetected = digitalRead(trigger_pin);
   delay(16000);
 
 
   // server.handleClient();
   delay(2);                     //allow the cpu to switch to other tasks
-                                if (totalLoop <= 10) {
-  // if (!isMosDetected) {         //isMosDetected is changed to low(0) state >> there exists input signal obtained from trigger pulse
+                                // if (totalLoop <= 10) {
+  if (!isMosDetected) {         //isMosDetected is changed to low(0) state >> there exists input signal obtained from trigger pulse
     prevInput = isMosDetected;  //set prevInput to low(0) >> to note the previous state of an input pin
-                                if (true) {
-    // if (allowCount) {
+                                // if (true) {
+    if (allowCount) {
 
       timer.start();
       SPIFFSInit();
