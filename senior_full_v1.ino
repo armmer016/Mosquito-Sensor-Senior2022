@@ -3,7 +3,7 @@
 #include <WiFiClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
-
+#include <MD5.h>
 #include "Timer.h"
 
 // I2S
@@ -48,7 +48,7 @@ Timer timer(MICROS);
 
 // Define the file to be recorded
 File file;
-const char filename[] = "/recording.wav";
+char filename[10][16] = { "/recording0.wav", "/recording1.wav", "/recording2.wav", "/recording3.wav", "/recording4.wav", "/recording5.wav", "/recording6.wav", "/recording7.wav", "/recording8.wav", "/recording9.wav" };
 const int headerSize = 44;
 
 // File system setup
@@ -101,11 +101,11 @@ bool exists(String path) {
 char* to_hex_string(const unsigned char* array, size_t length, int fid, int chunkid) {
   char* outstr = (char*)calloc(2 * length + 1, sizeof(char));
   if (!outstr) return outstr;
- 
+
   char* p = outstr;
   //  p = itoa(fid,p,10);
-   p += sprintf(p, "%d%03d", fid,chunkid);
-  for (size_t i = 0; i < length-2 ; ++i) {
+  p += sprintf(p, "%d%03d", fid, chunkid);
+  for (size_t i = 0; i < length - 2; ++i) {
     p += sprintf(p, "%02hhx", array[i]);
   }
 
@@ -140,7 +140,15 @@ void setup(void) {
     }
     DBG_OUTPUT_PORT.printf("\n");
   }
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS initialisation failed!");
+    while (1) yield();
+  }
 
+
+  for (int i = 0; i < 10; i++) {
+    SPIFFS.remove(filename[i]);
+  }
   // The I2S PART
 
   i2sInit();
@@ -161,28 +169,28 @@ void blink_led() {
 int totalLoop = 0;
 //Loop function
 void loop(void) {
-  // totalLoop += 1;
+  totalLoop += 1;
   isMosDetected = digitalRead(trigger_pin);
-  delay(16000);
-
-
+  Serial.println(totalLoop);
+  delay(10000);
   // server.handleClient();
-  delay(2);                     //allow the cpu to switch to other tasks
-                                // if (totalLoop <= 10) {
-  if (!isMosDetected) {         //isMosDetected is changed to low(0) state >> there exists input signal obtained from trigger pulse
+  delay(2);  //allow the cpu to switch to other tasks
+  if (totalLoop <= 1) {
+    // if (!isMosDetected) {         //isMosDetected is changed to low(0) state >> there exists input signal obtained from trigger pulse
     prevInput = isMosDetected;  //set prevInput to low(0) >> to note the previous state of an input pin
-                                // if (true) {
-    if (allowCount) {
+    if (true) {
+      // if (allowCount) {
 
       timer.start();
-      SPIFFSInit();
-      
-      xTaskCreate(i2s_adc, "i2s_adc", 1024 * 3, NULL, 1, NULL);         //recording
-      delay(1000);                                                      // wait for recording and finish file writing
+      int fIdNow = fileId;
+      SPIFFSInit(fIdNow);
+
+      xTaskCreate(i2s_adc, "i2s_adc", 1024 * 3, NULL, 1, NULL);  //recording
+      delay((RECORD_TIME * 1000) + 300);                         // wait for recording and finish file writing
+
+      xTaskCreate(udp_upload, "udp_upload", 1024 * 20, (void*)&fIdNow, 1, NULL);  //uploading
+      delay(10);                                                                  // wait for uploading task to assign localId
       fileId++;
-      xTaskCreate(udp_upload, "udp_upload", 1024 * 20, (void*)&fileId, 1, NULL);  //uploading
-      delay(10); // wait for uploading task to assign localId
-      
       count++;
       allowCount = 0;  //set to not allow counting if it still read low(0)
       Serial.print("\nMoqsuito count: ");
@@ -198,14 +206,10 @@ void loop(void) {
 }
 
 //Initialize SPIFFS (Space Efficient File Manager System)
-void SPIFFSInit() {
-  if (!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS initialisation failed!");
-    while (1) yield();
-  }
+void SPIFFSInit(int localId) {
 
-  SPIFFS.remove(filename);
-  file = SPIFFS.open(filename, FILE_WRITE);
+  SPIFFS.remove(filename[localId]);
+  file = SPIFFS.open(filename[localId], FILE_WRITE);
   if (!file) {
     Serial.println("File is not available!");
   }
@@ -305,22 +309,24 @@ void i2s_adc(void* arg) {
   vTaskDelete(NULL);
 }
 
-void udp_upload(void *arg) {
-  
+void udp_upload(void* arg) {
+
   int localId = (int)*((int*)arg);
-  fs::File file = SPIFFS.open("/recording.wav", "rb");
+
+
+  fs::File fileUp = SPIFFS.open(filename[localId], "rb");
   size_t read_len = 510;
 
-  Serial.println(file.size());
-  Serial.println(*((int*)arg));
+  Serial.println(fileUp.size());
+  Serial.println(filename[localId]);
 
-  byte buffer[read_len+2];
+  byte buffer[read_len + 2];
   // int totalChunk = int();
   // char buf[read_len * 2 + 2];
-  for (int k = 0; k < (file.size() / read_len) + 0.5 ; k++) {
+  for (int k = 0; k < (fileUp.size() / read_len) + 0.5; k++) {
 
-    
-    file.read(buffer, read_len);
+
+    fileUp.read(buffer, read_len);
 
     Serial.print("\n *** Converting to hex *** : #chunk");
     Serial.print(k);
@@ -328,25 +334,35 @@ void udp_upload(void *arg) {
     Serial.print("\nudp_upload run from core: ");
     Serial.print(xPortGetCoreID());
     Serial.print("\n");
-    char* outstr = to_hex_string(buffer, sizeof(buffer),localId,k);
+    char* outstr = to_hex_string(buffer, sizeof(buffer), localId, k);
     if (!outstr) {
       fprintf(stderr, "Failed to allocate memory\n");
     }
-    Serial.println(String("Total length: ").concat(String(read_len+2).concat(" bytes")));
+    Serial.println(String("Total length: ").concat(String(read_len + 2).concat(" bytes")));
+    unsigned char* hash = MD5::make_hash(outstr);
+    //generate the digest (hex encoding) of our hash
+    char* md5str = MD5::make_digest(hash, 16);
+    //print it on our serial monitor
+    Serial.println(md5str);
+    //Give the Memory back to the System if you run the md5 Hash generation in a loop
+    free(md5str);
+    //free dynamically allocated 16 byte hash from make_hash()
+    free(hash);
     nb.sendMsgHEX(serverIP, serverPort, outstr);
     delay(900);
     free(outstr);
     Serial.println("");
   }
-  String end =  "end";
+  String end = "end";
   end.concat(localId);
+
   nb.sendMsgSTR(serverIP, serverPort, end);
   delay(900);
-  String retdata = "";
+  // String retdata = "";
   // nb.waitResponse(retdata,serverIP);
   // if(retdata!="")Serial.println(retdata);
-  fileId--; // finish the task and decrease fileId by 1
-  file.close();
+  fileId--;  // finish the task and decrease fileId by 1
+  fileUp.close();
 
   // free(buffer);
   // free(buf);
